@@ -1,0 +1,3 @@
+# Runtime dependencies for fetch_data.py (standard library + these two only).
+requests>=2.31
+pandas>=2.0

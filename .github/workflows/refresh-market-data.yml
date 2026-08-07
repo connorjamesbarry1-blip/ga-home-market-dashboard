@@ -1,0 +1,63 @@
+# =============================================================================
+# Weekly refresh of North Georgia housing + rate data.
+#
+# What it does: runs fetch_data.py, then commits data/market.json back to the
+# repo if (and only if) it changed — so every refresh is version-controlled.
+#
+# ----------------------------------------------------------------------------
+# ONE-TIME SETUP — add your FRED API key as a repository secret:
+#   1. Get a free key: https://fred.stlouisfed.org/docs/api/api_key.html
+#   2. In this repo on GitHub: Settings > Secrets and variables > Actions
+#      > New repository secret
+#   3. Name it exactly:  FRED_API_KEY   (value = your key)
+# Until that secret exists, the rates block simply keeps its last-good values.
+# =============================================================================
+
+name: Refresh market data
+
+on:
+  schedule:
+    # Redfin refreshes its published files weekly. Run Monday morning US Eastern,
+    # after that update. Cron is in UTC: 12:00 UTC ≈ 7am EST / 8am EDT.
+    # (GitHub cron has no timezone; the 1-hour DST drift is harmless here.)
+    - cron: "0 12 * * 1"
+  workflow_dispatch: {}   # lets you run it on demand from the Actions tab
+
+# The job pushes a commit, so it needs write access to repo contents.
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch latest market data
+        env:
+          # Pulled from the repository secret you configured above.
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python fetch_data.py
+
+      - name: Commit refreshed data (only if changed)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain data/market.json)" ]; then
+            git add data/market.json
+            git commit -m "chore(data): weekly market.json refresh [skip ci]"
+            git push
+            echo "Committed refreshed data."
+          else
+            echo "No changes in data/market.json — nothing to commit."
+          fi

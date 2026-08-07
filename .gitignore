@@ -1,0 +1,29 @@
+# --- Secrets (never commit your FRED key) ---
+.env
+*.env
+*.fred_key
+fred_key.txt
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+
+# --- Local Redfin download cache (large gzipped TSVs — do NOT commit/redistribute) ---
+*.tsv
+*.tsv.gz
+*.tsv000.gz
+redfin_cache/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# NOTE: data/market.json is intentionally NOT ignored — it's the slim, committed
+# output the dashboard reads, and we want its refresh history version-controlled.

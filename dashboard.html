@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>North Georgia Home Market-Timing Dashboard</title>
+
+<!-- Chart.js via CDN. If you're offline, charts simply won't draw; everything
+     else (verdict, gauge, numbers, tooltips, calculators) still works. -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+<style>
+  /* ------------------------------------------------------------------ */
+  /* Design tokens                                                       */
+  /* ------------------------------------------------------------------ */
+  :root {
+    --buyer:   #1b8a4b;   /* green  = buyer's market / good for you   */
+    --seller:  #c0392b;   /* red    = seller's market / bad for you   */
+    --balanced:#c99700;   /* yellow = balanced                        */
+    --ink:     #1f2933;
+    --muted:   #667085;
+    --line:    #e4e7ec;
+    --bg:      #f7f8fa;
+    --card:    #ffffff;
+    --accent:  #2c5f8a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  h1,h2,h3 { line-height: 1.2; margin: 0 0 .4em; }
+  a { color: var(--accent); }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px 60px; }
+
+  /* ------------------------------------------------------------------ */
+  /* Sticky verdict header — always visible                             */
+  /* ------------------------------------------------------------------ */
+  .sticky {
+    position: sticky; top: 0; z-index: 50;
+    background: var(--card); border-bottom: 1px solid var(--line);
+    box-shadow: 0 2px 8px rgba(0,0,0,.06);
+  }
+  .sticky-inner { max-width: 1120px; margin: 0 auto; padding: 12px 16px; }
+  .top-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .banner {
+    flex: 1 1 320px; border-radius: 10px; padding: 14px 18px; color: #fff;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .banner.buyer   { background: var(--buyer); }
+  .banner.seller  { background: var(--seller); }
+  .banner.balanced{ background: var(--balanced); }
+  .banner .verdict { font-size: clamp(26px, 5vw, 40px); font-weight: 800; letter-spacing: .5px; }
+  .banner .sub { font-size: 14px; opacity: .95; }
+
+  .gauge-box { flex: 1 1 280px; min-width: 260px; }
+  .gauge-label { display:flex; justify-content:space-between; font-size:13px; color:var(--muted); margin-bottom:4px;}
+  .gauge {
+    position: relative; height: 22px; border-radius: 11px; overflow: hidden;
+    background: linear-gradient(90deg, var(--seller) 0%, var(--balanced) 50%, var(--buyer) 100%);
+  }
+  .gauge .needle {
+    position: absolute; top: -3px; width: 4px; height: 28px; background: #111;
+    border-radius: 2px; transform: translateX(-50%); box-shadow: 0 0 0 2px #fff;
+    transition: left .4s ease;
+  }
+  .gauge-score { font-size: 22px; font-weight: 800; margin-top: 4px; }
+  .gauge-ticks { display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-top:2px;}
+
+  .controls { display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap; }
+  select {
+    font-size: 15px; padding: 8px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: #fff; color: var(--ink);
+  }
+  .asof { font-size: 12px; color: var(--muted); margin-left:auto; }
+
+  /* ------------------------------------------------------------------ */
+  /* Cards & metrics                                                     */
+  /* ------------------------------------------------------------------ */
+  section { margin-top: 26px; }
+  .section-title { display:flex; align-items:center; gap:8px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; margin-top: 12px;
+  }
+  .grid { display: grid; gap: 14px; }
+  .grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+  .grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+  @media (max-width: 820px){ .grid.cols-3,.grid.cols-4{ grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 520px){ .grid.cols-3,.grid.cols-4{ grid-template-columns: 1fr; } }
+
+  .metric { background:#fff; border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .metric .k { font-size: 12px; color: var(--muted); display:flex; align-items:center; gap:6px; }
+  .metric .v { font-size: 24px; font-weight: 700; margin-top: 2px; }
+  .metric .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .leading { border-left: 4px solid var(--accent); }
+
+  /* trend arrows */
+  .arrow { font-weight: 700; }
+  .up   { color: var(--buyer); }   /* semantic color set per-metric in JS */
+  .down { color: var(--seller); }
+  .flat { color: var(--muted); }
+
+  .badge { display:inline-block; font-size:11px; font-weight:700; padding:2px 8px; border-radius:999px; }
+  .badge.good { background:#e7f5ec; color:var(--buyer);}
+  .badge.warn { background:#fdf2e0; color:var(--balanced);}
+  .badge.bad  { background:#fce9e6; color:var(--seller);}
+
+  /* ------------------------------------------------------------------ */
+  /* Info tooltips (hover on desktop, click-to-expand on mobile)         */
+  /* ------------------------------------------------------------------ */
+  .info {
+    display:inline-flex; align-items:center; justify-content:center;
+    width:16px; height:16px; border-radius:50%; background:var(--line); color:var(--muted);
+    font-size:11px; font-weight:700; cursor:pointer; position:relative; user-select:none;
+  }
+  .info .tip {
+    display:none; position:absolute; z-index:60; left:50%; top:22px; transform:translateX(-50%);
+    width:min(300px, 80vw); background:#111; color:#fff; font-size:12.5px; font-weight:400;
+    line-height:1.45; padding:10px 12px; border-radius:8px; box-shadow:0 6px 20px rgba(0,0,0,.25);
+    text-align:left;
+  }
+  .info:hover .tip, .info.open .tip { display:block; }
+  .info .tip b { color:#fff; }
+
+  .chart-card { position:relative; height: 260px; }
+  .chart-card canvas { max-height: 230px; }
+
+  /* Decision tools */
+  .calc-grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:12px; }
+  @media (max-width:640px){ .calc-grid{ grid-template-columns:1fr; } }
+  .field { display:flex; flex-direction:column; gap:4px; font-size:13px; }
+  .field input { padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:15px; }
+  .calc-out { margin-top:14px; padding:14px; border-radius:10px; background:#f2f6fb; border:1px solid #d9e6f2; }
+  .winner { font-size:18px; font-weight:800; }
+
+  .subscore { display:grid; grid-template-columns: 180px 1fr 48px; gap:10px; align-items:center; margin:6px 0; font-size:13px; }
+  .bar { height:12px; border-radius:6px; background:var(--line); overflow:hidden; }
+  .bar > span { display:block; height:100%; background:var(--accent); }
+  @media (max-width:520px){ .subscore{ grid-template-columns: 1fr; } }
+
+  /* compare view */
+  .compare-table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  .compare-table th, .compare-table td { text-align:left; padding:10px 8px; border-bottom:1px solid var(--line); }
+  .compare-table th { color:var(--muted); font-weight:600; }
+  .pill { font-weight:700; padding:2px 8px; border-radius:999px; color:#fff; font-size:12px; }
+
+  footer { margin-top:40px; padding-top:16px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
+  .hidden { display:none !important; }
+  .lede { color:var(--muted); max-width:70ch; }
+</style>
+</head>
+<body>
+
+<!-- ==================================================================== -->
+<!-- STICKY VERDICT HEADER                                                 -->
+<!-- ==================================================================== -->
+<header class="sticky">
+  <div class="sticky-inner">
+    <div class="top-row">
+      <div id="banner" class="banner balanced">
+        <div class="verdict" id="verdictText">—</div>
+        <div class="sub" id="verdictSummary">Loading market data…</div>
+      </div>
+      <div class="gauge-box">
+        <div class="gauge-label">
+          <span>Buyer Leverage Score
+            <span class="info">i<span class="tip"><b>Buyer Leverage Score (0–100).</b>
+              A blend of the four things that decide how much power you have at the negotiating table:
+              months of supply, whether homes are sitting longer, how many listings are cutting price,
+              and how far below asking homes actually sell. Higher = more leverage for you as the buyer.</span></span>
+          </span>
+          <span id="leverageBand">—</span>
+        </div>
+        <div class="gauge"><div class="needle" id="needle" style="left:50%"></div></div>
+        <div class="gauge-ticks"><span>0 · Seller</span><span>50 · Balanced</span><span>100 · Buyer</span></div>
+        <div class="gauge-score" id="leverageScore">—</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label for="area" style="font-size:13px;color:var(--muted)">Area</label>
+      <select id="area">
+        <option value="canton_cherokee">Canton / Cherokee</option>
+        <option value="kennesaw_cobb">Kennesaw / Cobb</option>
+        <option value="cumming_forsyth">Cumming / Forsyth</option>
+        <option value="__all__">All / compare</option>
+      </select>
+      <span class="asof" id="asof"></span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ================= SINGLE-AREA VIEW ================= -->
+  <div id="singleView">
+
+    <!-- PRICE ------------------------------------------------------------ -->
+    <section>
+      <h2 class="section-title">Price <span class="badge warn">lagging indicator</span></h2>
+      <p class="lede">What homes actually sold for. Price is a <b>lagging</b> signal — it turns
+        <em>after</em> supply and days-on-market do, so treat softening price as confirmation, not an early warning.</p>
+      <div class="grid cols-4" id="priceMetrics"></div>
+      <div class="card chart-card"><canvas id="priceChart"></canvas></div>
+    </section>
+
+    <!-- INVENTORY / LEVERAGE -------------------------------------------- -->
+    <section>
+      <h2 class="section-title">Inventory &amp; Leverage <span class="badge good">leading indicators</span></h2>
+      <p class="lede">These move <b>first</b>. When supply builds, homes linger, and sellers start
+        cutting prices, your negotiating power rises weeks-to-months before the price stats catch up.</p>
+      <div class="grid cols-3" id="leverageMetrics"></div>
+      <div class="card chart-card"><canvas id="supplyChart"></canvas></div>
+    </section>
+
+    <!-- RATES ----------------------------------------------------------- -->
+    <section>
+      <h2 class="section-title">Mortgage Rates &amp; the Macro Backdrop</h2>
+      <p class="lede">Mortgage rates roughly track the <b>10-year Treasury + inflation + Fed tone</b>, with a lag.
+        Watching the 10-yr and CPI tells you where the 30-yr fixed is likely headed.</p>
+      <div class="grid cols-4" id="rateMetrics"></div>
+      <div class="card chart-card"><canvas id="rateChart"></canvas></div>
+    </section>
+
+    <!-- AFFORDABILITY --------------------------------------------------- -->
+    <section>
+      <h2 class="section-title">Affordability
+        <span class="info">i<span class="tip"><b>Affordability index.</b> The monthly principal &amp; interest
+          payment on the area's median home (20% down, current 30-yr rate) as a share of the area's median
+          household income. Above ~30% is historically "stretched." When payments are stretched, prices have
+          less room to keep rising and more room to fall; when affordability is normal, prices are nearer a floor.</span></span>
+      </h2>
+      <div class="grid cols-3" id="affordMetrics"></div>
+      <div class="card chart-card"><canvas id="affordChart"></canvas></div>
+    </section>
+
+    <!-- SEASONALITY ----------------------------------------------------- -->
+    <section>
+      <h2 class="section-title">Seasonality &amp; Timing Windows</h2>
+      <p class="lede">Two calendar patterns to exploit:
+        <b>builder quarter-ends</b> (Mar / Jun / Sep / Dec) are when production builders discount hardest to
+        hit sales targets, and <b>spring</b> brings the most inventory but also the most competing buyers.
+        Late fall / winter has thinner inventory but far less competition and more motivated sellers.</p>
+      <div class="card chart-card"><canvas id="seasonChart"></canvas></div>
+    </section>
+  </div>
+
+  <!-- ================= COMPARE VIEW ================= -->
+  <div id="compareView" class="hidden">
+    <section>
+      <h2>All areas — side by side</h2>
+      <p class="lede">Verdict is driven by months of supply (&lt;4 seller's, 4–6 balanced, &gt;6 buyer's),
+        refined by the leverage score.</p>
+      <div class="card" style="overflow-x:auto">
+        <table class="compare-table" id="compareTable"></table>
+      </div>
+      <div class="card chart-card"><canvas id="compareSupplyChart"></canvas></div>
+    </section>
+  </div>
+
+  <!-- ================= DECISION TOOLS ================= -->
+  <section>
+    <h2>Decision Tool 1 — Wait vs. Buy Now</h2>
+    <p class="lede">Does waiting actually save money once expected <b>price</b> movement is netted against
+      expected <b>rate</b> movement? Fill in your assumptions.</p>
+    <div class="card">
+      <div class="calc-grid">
+        <label class="field">Current price ($)
+          <input id="c_price" type="number" value="425000" step="5000" /></label>
+        <label class="field">Current 30-yr rate (%)
+          <input id="c_rate" type="number" value="6.72" step="0.05" /></label>
+        <label class="field">Months you'd wait
+          <input id="c_months" type="number" value="6" step="1" /></label>
+        <label class="field">Expected rate change over that wait (pts, e.g. -0.5)
+          <input id="c_ratechg" type="number" value="-0.5" step="0.1" /></label>
+        <label class="field">Expected price change over that wait (%, e.g. -2)
+          <input id="c_pricechg" type="number" value="-2" step="0.5" /></label>
+        <label class="field">Down payment (%)
+          <input id="c_down" type="number" value="20" step="1" /></label>
+      </div>
+      <div class="calc-out" id="calcOut"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Decision Tool 2 — Composite Buy Signal
+      <span class="info">i<span class="tip"><b>Buy Signal (0–100).</b> Rolls up five factors — months of supply,
+        year-over-year price trend, share of listings cutting price, sale-to-list ratio, and rate direction —
+        into one score. The sub-scores below show exactly what's driving it, so it's not a black box.</span></span>
+    </h2>
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+        <div>
+          <div class="gauge-score" id="buySignalScore" style="font-size:40px">—</div>
+          <div id="buySignalBand" class="badge">—</div>
+        </div>
+        <div style="flex:1;min-width:260px" id="subScores"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= HOW TO READ ================= -->
+  <section>
+    <h2>How to read this dashboard</h2>
+    <div class="card">
+      <p><b>Leading vs. lagging.</b> Inventory, days-on-market, price cuts and sale-to-list are
+        <b>leading</b> — they shift first. Median price and YoY are <b>lagging</b> — they confirm a move
+        that already happened. Watch the leading set to see a turn coming; use price to confirm it.</p>
+      <p><b>Why inventory moves before price.</b> Sellers cut price only after their home sits. So supply
+        rising and DOM lengthening show up weeks-to-months before the median sale price bends. By the time
+        YoY price is clearly negative, the leverage shift is already well underway.</p>
+      <p><b>Why nobody times the exact bottom.</b> You only know the bottom in the rear-view mirror, and a
+        ~9% round-trip in transaction costs (agent commissions, closing, moving, seller costs when you
+        eventually sell) dwarfs the money you'd save shaving a small amount off the price or rate. A rate you
+        dislike can be refinanced later; the price you pay is locked in. Aim for a <em>good</em> window with
+        real leverage, not a perfect one.</p>
+    </div>
+  </section>
+
+  <footer>
+    <p><b>Disclaimer.</b> Estimates only, for personal research. This is <b>not</b> financial, investment,
+    lending, or real-estate advice. Figures are approximate and may be stale or wrong. Verify every number
+    with a licensed real-estate and lending professional and current source data before making any decision.</p>
+    <p>Data: Redfin Data Center (housing, published county files, personal use — not redistributed) and
+    FRED (rates &amp; inflation). Loaded from <code>data/market.json</code>; falls back to built-in seed values.</p>
+  </footer>
+
+</div>
+
+<script>
+/* ====================================================================== */
+/* SEED CONSTANTS                                                          */
+/* These mirror the shape of data/market.json exactly. The dashboard tries */
+/* to load the JSON first; if it's missing (e.g. you just double-clicked    */
+/* the file with no data yet), it renders from these instead. Edit freely.  */
+/* ====================================================================== */
+const SEED = {
+  generated_at: "seed",
+  data_sources: { redfin_period: "2026-07 (seed)", fred_asof: "2026-07 (seed)" },
+  rates: {
+    mortgage30: { value: 6.72, history: mkHist([6.90,6.85,6.80,6.88,6.95,6.99,6.93,6.84,6.79,6.76,6.74,6.72]) },
+    treasury10: { value: 4.25, history: mkHist([4.40,4.36,4.33,4.41,4.48,4.52,4.45,4.38,4.33,4.30,4.27,4.25]) },
+    cpi_yoy:    { value: 3.1,  history: mkHist([3.3,3.2,3.3,3.4,3.3,3.2,3.2,3.1,3.1,3.0,3.1,3.1]) },
+    direction: "falling",
+    direction_reason: "30-yr fixed (6.72%) sits below its 3-month average and the 10-yr Treasury has eased to 4.25% with CPI near 3.1% — the setup that pulls mortgage rates lower, with a lag."
+  },
+  areas: {
+    canton_cherokee: {
+      label:"Canton / Cherokee", county:"Cherokee County, GA",
+      median_sale_price:425000, median_ppsf:193, price_yoy:-3.4, price_mom:-0.6,
+      months_of_supply:3.3, days_on_market:47, price_drops_pct:31, sale_to_list:97.3,
+      inventory:640, inventory_yoy:12.5, new_listings:310, median_household_income:95000,
+      history: mkAreaHist(
+        [440000,438000,436000,433000,430000,428000,427000,428000,430000,429000,427000,425000],
+        [2.8,2.9,3.0,3.1,3.2,3.3,3.4,3.2,3.0,3.1,3.2,3.3],
+        [30,33,36,40,44,46,48,45,41,43,45,47],
+        [22,24,26,28,30,31,32,30,28,29,30,31])
+    },
+    kennesaw_cobb: {
+      label:"Kennesaw / Cobb", county:"Cobb County, GA",
+      median_sale_price:380000, median_ppsf:185, price_yoy:0.5, price_mom:0.2,
+      months_of_supply:4.5, days_on_market:47, price_drops_pct:25, sale_to_list:97.0,
+      inventory:1850, inventory_yoy:9.0, new_listings:720, median_household_income:88000,
+      history: mkAreaHist(
+        [378000,377000,376000,375000,374000,375000,376000,377000,379000,380000,381000,380000],
+        [3.5,3.7,3.9,4.1,4.3,4.5,4.6,4.4,4.2,4.3,4.4,4.5],
+        [35,37,40,43,46,47,48,46,44,45,46,47],
+        [18,19,21,23,24,25,26,24,23,24,25,25])
+    },
+    cumming_forsyth: {
+      label:"Cumming / Forsyth", county:"Forsyth County, GA",
+      median_sale_price:584000, median_ppsf:222, price_yoy:-4.8, price_mom:-0.8,
+      months_of_supply:5.5, days_on_market:67, price_drops_pct:28, sale_to_list:96.8,
+      inventory:1120, inventory_yoy:18.0, new_listings:480, median_household_income:135000,
+      history: mkAreaHist(
+        [608000,605000,601000,597000,593000,590000,589000,591000,594000,591000,588000,584000],
+        [4.0,4.3,4.6,4.9,5.2,5.4,5.6,5.4,5.2,5.3,5.4,5.5],
+        [50,53,57,61,64,66,68,66,63,64,65,67],
+        [20,21,23,25,27,28,29,27,26,27,28,28])
+    }
+  }
+};
+
+// Build the shared 12-month labels used by the seed (Aug 2025 → Jul 2026).
+const SEED_LABELS = ["2025-08","2025-09","2025-10","2025-11","2025-12","2026-01",
+                     "2026-02","2026-03","2026-04","2026-05","2026-06","2026-07"];
+function mkHist(values){ return values.map((v,i)=>({date:SEED_LABELS[i], value:v})); }
+function mkAreaHist(price, supply, dom, drops){
+  return { labels: SEED_LABELS, median_sale_price:price, months_of_supply:supply,
+           days_on_market:dom, price_drops_pct:drops };
+}
+
+/* ====================================================================== */
+/* GLOBAL STATE (in-memory only — no localStorage/sessionStorage)          */
+/* ====================================================================== */
+let DATA = SEED;                 // replaced by market.json if available
+let currentArea = "canton_cherokee";
+const charts = {};               // live Chart.js instances, so we can destroy/rebuild
+const AREA_KEYS = ["canton_cherokee","kennesaw_cobb","cumming_forsyth"];
+const DOWN_PAYMENT_PCT = 0.20;   // assumption baked into the affordability index
+
+/* ====================================================================== */
+/* MORTGAGE MATH                                                           */
+/* ====================================================================== */
+// Standard amortized monthly payment: principal, annual rate %, term years.
+function monthlyPayment(principal, annualRatePct, years=30){
+  const r = (annualRatePct/100)/12, n = years*12;
+  if (r === 0) return principal/n;
+  return principal * r * Math.pow(1+r,n) / (Math.pow(1+r,n)-1);
+}
+
+/* ====================================================================== */
+/* SCORING                                                                 */
+/* ====================================================================== */
+// Clamp helper.
+const clamp = (x,lo=0,hi=100)=>Math.max(lo,Math.min(hi,x));
+
+// Verdict is driven primarily by months of supply.
+function verdictFromSupply(mos){
+  if (mos < 4)  return {key:"seller",   text:"SELLER'S MARKET",   color:"seller"};
+  if (mos <= 6) return {key:"balanced", text:"BALANCED MARKET",   color:"balanced"};
+  return               {key:"buyer",    text:"BUYER'S MARKET",    color:"buyer"};
+}
+
+// Buyer Leverage Score (0-100): higher = more buyer power.
+// Blends supply, DOM (via its recent trend), price-cut share, and sale-to-list.
+function leverageScore(a){
+  // months of supply: 2 -> 10 (low leverage) .. 8 -> 90 (high leverage)
+  const sSupply = clamp((a.months_of_supply - 2) / (8 - 2) * 100);
+  // days on market: 20 -> 15 .. 90 -> 90
+  const sDom    = clamp((a.days_on_market - 20) / (90 - 20) * 100);
+  // % price cuts: 10% -> 10 .. 45% -> 90
+  const sDrops  = clamp((a.price_drops_pct - 10) / (45 - 10) * 100);
+  // sale-to-list: 100% -> 5 (no room) .. 94% -> 90 (lots of room). Inverted.
+  const sStl    = clamp((100 - a.sale_to_list) / (100 - 94) * 90 + 5);
+  // Weighted blend — supply and price cuts weigh most.
+  const score = 0.40*sSupply + 0.20*sDom + 0.25*sDrops + 0.15*sStl;
+  return Math.round(clamp(score));
+}
+function leverageBand(score){
+  if (score >= 60) return "High leverage";
+  if (score >= 40) return "Moderate";
+  return "Low leverage";
+}
+
+// Composite Buy Signal (0-100) with visible sub-scores.
+function buySignal(a, rates){
+  const subs = [];
+  // 1. Months of supply (more supply = better time to buy)
+  subs.push({label:"Months of supply", score: clamp((a.months_of_supply-2)/(8-2)*100),
+             detail: a.months_of_supply.toFixed(1)+" mo"});
+  // 2. YoY price trend (falling prices favor buyers): +3% -> 20, -6% -> 90
+  subs.push({label:"YoY price trend", score: clamp((3 - a.price_yoy)/(3+6)*70 + 20),
+             detail: (a.price_yoy>0?"+":"")+a.price_yoy+"%"});
+  // 3. Price-drop share (more cuts = better)
+  subs.push({label:"Listings cutting price", score: clamp((a.price_drops_pct-10)/(45-10)*100),
+             detail: a.price_drops_pct+"%"});
+  // 4. Sale-to-list (lower = more room to negotiate)
+  subs.push({label:"Sale-to-list room", score: clamp((100-a.sale_to_list)/(100-94)*90+5),
+             detail: a.sale_to_list+"%"});
+  // 5. Rate direction (falling = better for buyers)
+  const dir = rates.direction || "flat";
+  const dirScore = dir==="falling"?80 : dir==="rising"?25 : 50;
+  subs.push({label:"Rate direction", score: dirScore, detail: dir});
+
+  const total = Math.round(subs.reduce((s,x)=>s+x.score,0)/subs.length);
+  return {total: clamp(total), subs};
+}
+function signalBand(score){
+  if (score >= 70) return {text:"Favorable window", cls:"good"};
+  if (score >= 40) return {text:"Mixed", cls:"warn"};
+  return {text:"Unfavorable", cls:"bad"};
+}
+
+/* ====================================================================== */
+/* SMALL RENDER HELPERS                                                    */
+/* ====================================================================== */
+const fmt$ = n => n==null ? "—" : "$"+Math.round(n).toLocaleString();
+const fmtPct = (n,d=1) => n==null ? "—" : (n>0?"+":"")+Number(n).toFixed(d)+"%";
+
+// Colored trend arrow. `buyerGood` = "down" means a falling value is good for the buyer.
+function arrow(delta, buyerGood="down"){
+  const eps = 1e-6;
+  let dir = Math.abs(delta) < eps ? "flat" : (delta>0 ? "up":"down");
+  let glyph = dir==="up" ? "▲" : dir==="down" ? "▼" : "▶";
+  let good;
+  if (dir==="flat") good = "flat";
+  else if (buyerGood==="down") good = dir==="down" ? "up" /*green*/ : "down" /*red*/;
+  else                          good = dir==="up"   ? "up" : "down";
+  return `<span class="arrow ${good}">${glyph}</span>`;
+}
+
+// Build an info tooltip badge combining (a) definition + (b) what it means now.
+function info(html){ return `<span class="info">i<span class="tip">${html}</span></span>`; }
+
+// One metric tile.
+function metric({k, v, sub="", tip="", leading=false}){
+  return `<div class="metric ${leading?'leading':''}">
+    <div class="k">${k}${tip?info(tip):""}</div>
+    <div class="v">${v}</div>
+    <div class="sub">${sub}</div>
+  </div>`;
+}
+
+// Recent-trend delta from a history array (last value minus value `n` back).
+function trendDelta(arr, n=3){
+  if (!arr || arr.length <= n) return 0;
+  return arr[arr.length-1] - arr[arr.length-1-n];
+}
+
+/* ====================================================================== */
+/* RENDER: STICKY VERDICT + GAUGE                                          */
+/* ====================================================================== */
+function renderVerdict(a){
+  const v = verdictFromSupply(a.months_of_supply);
+  const banner = document.getElementById("banner");
+  banner.className = "banner " + v.color;
+  document.getElementById("verdictText").textContent = v.text;
+
+  // Plain-English one-liner tuned to the numbers.
+  const cutTxt = a.price_drops_pct >= 30 ? "a third of listings cutting price"
+               : a.price_drops_pct >= 20 ? "a meaningful share of listings cutting price"
+               : "few listings cutting price";
+  const leverageTxt = v.key==="buyer" ? "you have real leverage"
+                    : v.key==="balanced" ? "leverage is roughly even" : "sellers hold the edge";
+  document.getElementById("verdictSummary").textContent =
+    `${a.months_of_supply} months supply, ${a.days_on_market} days on market, ${cutTxt} — ${leverageTxt}.`;
+
+  const score = leverageScore(a);
+  document.getElementById("needle").style.left = score + "%";
+  document.getElementById("leverageScore").textContent = score + " / 100";
+  document.getElementById("leverageBand").textContent = leverageBand(score);
+}
+
+/* ====================================================================== */
+/* RENDER: METRIC SECTIONS                                                 */
+/* ====================================================================== */
+function renderMetrics(a){
+  // ---- PRICE ----
+  const priceTrend = trendDelta(a.history.median_sale_price, 3);
+  document.getElementById("priceMetrics").innerHTML = [
+    metric({k:"Median sale price", v:fmt$(a.median_sale_price),
+      sub:`${arrow(priceTrend,"down")} 3-mo move`,
+      tip:`<b>What it is:</b> the middle sale price — half sold for more, half for less.<br>
+           <b>For you now:</b> at ${fmt$(a.median_sale_price)}, the 3-month move is
+           ${priceTrend<0?"down (softening — good for a buyer)":priceTrend>0?"up (still firming)":"flat"}.`}),
+    metric({k:"Price / sq ft", v:"$"+a.median_ppsf,
+      tip:`<b>What it is:</b> price normalized by size, so you can compare homes of different footprints.<br>
+           <b>For you now:</b> use $${a.median_ppsf}/sqft as a sniff test — a listing far above area $/sqft needs a reason.`}),
+    metric({k:"Year-over-year", v:fmtPct(a.price_yoy),
+      sub:`${arrow(a.price_yoy,"down")} vs. 12 mo ago`,
+      tip:`<b>What it is:</b> change in median price vs. a year ago — the headline "are prices up or down" number.<br>
+           <b>For you now:</b> ${a.price_yoy<0?"negative YoY confirms prices are softening in this area.":"positive YoY means prices are still higher than a year ago."}`}),
+    metric({k:"Month-over-month", v:fmtPct(a.price_mom),
+      sub:`${arrow(a.price_mom,"down")} vs. last month`,
+      tip:`<b>What it is:</b> the most recent monthly wiggle — noisy, but the freshest read.<br>
+           <b>For you now:</b> one month is noise; watch whether several negatives stack up.`})
+  ].join("");
+
+  // ---- INVENTORY / LEVERAGE ----
+  const domTrend = trendDelta(a.history.days_on_market, 3);
+  const supplyTrend = trendDelta(a.history.months_of_supply, 3);
+  const dropsTrend = trendDelta(a.history.price_drops_pct, 3);
+  document.getElementById("leverageMetrics").innerHTML = [
+    metric({leading:true, k:"Months of supply", v:a.months_of_supply,
+      sub:`${arrow(supplyTrend,"up")} 3-mo · ${verdictFromSupply(a.months_of_supply).text.split("'")[0].toLowerCase()}'s`,
+      tip:`<b>What it is:</b> how long it'd take to sell every active listing at the current pace.
+           &lt;4 = seller's, 4–6 = balanced, &gt;6 = buyer's.<br>
+           <b>For you now:</b> ${a.months_of_supply} months → ${verdictFromSupply(a.months_of_supply).text.toLowerCase()}.
+           This is the single most important leading gauge here.`}),
+    metric({leading:true, k:"Days on market", v:a.days_on_market,
+      sub:`${arrow(domTrend,"up")} 3-mo move`,
+      tip:`<b>What it is:</b> typical time from list to contract. Rising DOM = homes sitting = seller patience thinning.<br>
+           <b>For you now:</b> ${a.days_on_market} days and ${domTrend>0?"climbing — sellers are getting more negotiable.":"not rising — sellers still have pace."}`}),
+    metric({leading:true, k:"Listings w/ price cuts", v:a.price_drops_pct+"%",
+      sub:`${arrow(dropsTrend,"up")} 3-mo move`,
+      tip:`<b>What it is:</b> share of active listings that have dropped their asking price at least once.<br>
+           <b>For you now:</b> ${a.price_drops_pct}% cutting price ${a.price_drops_pct>=30?"is high — many sellers mispriced and know it. Offer accordingly.":"is moderate — pockets of negotiability."}`}),
+    metric({leading:true, k:"Sale-to-list ratio", v:a.sale_to_list+"%",
+      tip:`<b>What it is:</b> final sale price ÷ last list price. Under 100% means homes sell below asking.<br>
+           <b>For you now:</b> ${a.sale_to_list}% means the typical home sells ~${(100-a.sale_to_list).toFixed(1)}% under ask — your realistic negotiating room.`}),
+    metric({leading:true, k:"Active inventory", v:a.inventory?.toLocaleString?.()||a.inventory,
+      sub:`${arrow(a.inventory_yoy,"up")} ${fmtPct(a.inventory_yoy)} YoY`,
+      tip:`<b>What it is:</b> homes currently for sale. More choice = more leverage.<br>
+           <b>For you now:</b> inventory is ${a.inventory_yoy>0?"up":"down"} ${Math.abs(a.inventory_yoy)}% YoY — ${a.inventory_yoy>0?"more options than a year ago.":"tighter than a year ago."}`}),
+    metric({leading:true, k:"New listings", v:a.new_listings?.toLocaleString?.()||a.new_listings,
+      tip:`<b>What it is:</b> fresh listings hitting the market this period — the supply pipeline.<br>
+           <b>For you now:</b> steady/rising new listings keep replenishing your choices.`})
+  ].join("");
+
+  // ---- RATES (shared across areas) ----
+  const r = DATA.rates;
+  const m = r.mortgage30.history.map(p=>p.value);
+  const chg3  = trendDelta(m,3), chg6 = trendDelta(m,6), chg12 = m[m.length-1]-m[0];
+  const dirColor = r.direction==="falling"?"good":r.direction==="rising"?"bad":"warn";
+  document.getElementById("rateMetrics").innerHTML = [
+    metric({k:"30-yr fixed", v:r.mortgage30.value+"%",
+      sub:`<span class="badge ${dirColor}">${r.direction}</span>`,
+      tip:`<b>What it is:</b> the national average 30-yr fixed mortgage rate (Freddie Mac via FRED).<br>
+           <b>For you now:</b> direction is <b>${r.direction}</b>. ${r.direction_reason}`}),
+    metric({k:"10-yr Treasury", v:r.treasury10.value+"%",
+      tip:`<b>What it is:</b> the benchmark bond yield mortgages track (plus a spread).<br>
+           <b>For you now:</b> if the 10-yr keeps easing, the 30-yr fixed usually follows within weeks.`}),
+    metric({k:"Inflation (CPI YoY)", v:r.cpi_yoy.value+"%",
+      tip:`<b>What it is:</b> consumer price inflation vs. a year ago.<br>
+           <b>For you now:</b> cooler inflation lets the Fed ease and pulls rates down; hotter inflation does the opposite.`}),
+    metric({k:"Rate trend", v:`${chg3<0?"▼":chg3>0?"▲":"▶"} 3-mo`,
+      sub:`3mo ${fmtPtsPts(chg3)} · 6mo ${fmtPtsPts(chg6)} · 12mo ${fmtPtsPts(chg12)}`,
+      tip:`<b>What it is:</b> how the 30-yr fixed has moved over 3, 6, and 12 months (percentage points).<br>
+           <b>For you now:</b> a rate you dislike can be refinanced later; don't over-weight small wiggles vs. price.`})
+  ].join("");
+
+  // ---- AFFORDABILITY ----
+  renderAffordability(a);
+}
+// pts formatter for rate changes (e.g. "-0.20 pts")
+function fmtPtsPts(x){ return (x>0?"+":"")+x.toFixed(2)+" pts"; }
+
+function renderAffordability(a){
+  const rate = DATA.rates.mortgage30.value;
+  const loan = a.median_sale_price * (1-DOWN_PAYMENT_PCT);
+  const pay  = monthlyPayment(loan, rate);
+  const annual = pay*12;
+  const idx = (annual / a.median_household_income) * 100; // % of income to P&I
+  const stretched = idx > 30;
+  document.getElementById("affordMetrics").innerHTML = [
+    metric({k:"Est. monthly P&I", v:fmt$(pay),
+      tip:`<b>What it is:</b> principal &amp; interest on the median home (${(DOWN_PAYMENT_PCT*100)}% down, ${rate}% for 30 yrs). Excludes taxes/insurance.<br>
+           <b>For you now:</b> ${fmt$(pay)}/mo is the baseline before taxes, insurance, HOA.`}),
+    metric({k:"Affordability index", v:idx.toFixed(0)+"%",
+      sub:`<span class="badge ${stretched?'bad':'good'}">${stretched?'Stretched':'Normal'}</span>`,
+      tip:`<b>What it is:</b> that payment as a share of the area's median household income (${fmt$(a.median_household_income)}). Above ~30% is stretched.<br>
+           <b>For you now:</b> ${stretched?"stretched affordability means prices have less room to rise and more room to fall — buyers are near their limit.":"affordability is in a normal band — prices are nearer a floor than a cliff."}`}),
+    metric({k:"Area median income", v:fmt$(a.median_household_income),
+      tip:`<b>What it is:</b> approximate median household income for the county (Census ACS).<br>
+           <b>For you now:</b> the denominator for affordability — higher-income areas (e.g. Forsyth) sustain higher prices.`})
+  ].join("");
+}
+
+/* ====================================================================== */
+/* RENDER: CHARTS                                                          */
+/* ====================================================================== */
+function destroyChart(id){ if (charts[id]) { charts[id].destroy(); delete charts[id]; } }
+function lineChart(id, labels, datasets, yTitle){
+  const el = document.getElementById(id);
+  if (!el || !window.Chart) return;
+  destroyChart(id);
+  charts[id] = new Chart(el, {
+    type:"line",
+    data:{ labels, datasets: datasets.map(d=>({tension:.25, borderWidth:2, pointRadius:2, ...d})) },
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{ display: datasets.length>1 } },
+      scales:{ y:{ title:{display:!!yTitle, text:yTitle} } } }
+  });
+}
+
+function renderCharts(a){
+  const h = a.history;
+  lineChart("priceChart", h.labels,
+    [{label:"Median sale price", data:h.median_sale_price, borderColor:"#2c5f8a", backgroundColor:"rgba(44,95,138,.1)", fill:true}],
+    "$");
+  lineChart("supplyChart", h.labels, [
+    {label:"Months of supply", data:h.months_of_supply, borderColor:"#1b8a4b", yAxisID:"y"},
+    {label:"% price cuts", data:h.price_drops_pct, borderColor:"#c99700", yAxisID:"y1"}
+  ]);
+  // dual axis tweak for supply chart
+  if (charts.supplyChart){
+    charts.supplyChart.options.scales.y1 = {position:"right", grid:{drawOnChartArea:false}, title:{display:true,text:"% cuts"}};
+    charts.supplyChart.options.scales.y.title = {display:true, text:"months"};
+    charts.supplyChart.update();
+  }
+
+  const r = DATA.rates;
+  lineChart("rateChart", r.mortgage30.history.map(p=>p.date), [
+    {label:"30-yr fixed %", data:r.mortgage30.history.map(p=>p.value), borderColor:"#c0392b"},
+    {label:"10-yr Treasury %", data:r.treasury10.history.map(p=>p.value), borderColor:"#2c5f8a"},
+    {label:"CPI YoY %", data:r.cpi_yoy.history.map(p=>p.value), borderColor:"#c99700"}
+  ], "%");
+
+  // Affordability over time: payment-to-income % using each month's price & rate.
+  const rateHist = r.mortgage30.history.map(p=>p.value);
+  const afford = h.median_sale_price.map((price,i)=>{
+    const rt = rateHist[i] ?? r.mortgage30.value;
+    const pay = monthlyPayment(price*(1-DOWN_PAYMENT_PCT), rt)*12;
+    return +( (pay/a.median_household_income)*100 ).toFixed(1);
+  });
+  lineChart("affordChart", h.labels,
+    [{label:"Affordability (% of income to P&I)", data:afford, borderColor:"#7b3fa0", backgroundColor:"rgba(123,63,160,.1)", fill:true}],
+    "% of income");
+  // reference line at 30% via annotation-free approach: add a flat dataset
+  if (charts.affordChart){
+    charts.affordChart.data.datasets.push({label:"Stretched (30%)", data:h.labels.map(()=>30),
+      borderColor:"#c0392b", borderDash:[6,4], pointRadius:0, borderWidth:1});
+    charts.affordChart.update();
+  }
+
+  renderSeasonChart();
+}
+
+// Seasonality: illustrative typical pattern (not area-specific live data).
+function renderSeasonChart(){
+  const el = document.getElementById("seasonChart");
+  if (!el || !window.Chart) return;
+  destroyChart("seasonChart");
+  const q = ["Q1 (Jan-Mar)","Q2 (Apr-Jun)","Q3 (Jul-Sep)","Q4 (Oct-Dec)"];
+  charts.seasonChart = new Chart(el, {
+    type:"bar",
+    data:{ labels:q, datasets:[
+      {label:"Relative inventory", data:[70,100,90,60], backgroundColor:"rgba(44,95,138,.6)"},
+      {label:"Builder incentive strength", data:[85,60,80,100], backgroundColor:"rgba(27,138,75,.6)"}
+    ]},
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:true},
+        tooltip:{callbacks:{footer:()=> "Quarter-ends (Mar/Jun/Sep/Dec) = best builder deals; spring = most inventory & competition."}}},
+      scales:{ y:{ title:{display:true,text:"relative (0–100)"}, max:110 } } }
+  });
+}
+
+/* ====================================================================== */
+/* RENDER: COMPARE VIEW                                                    */
+/* ====================================================================== */
+function renderCompare(){
+  const rows = AREA_KEYS.map(k=>{
+    const a = DATA.areas[k]; const v = verdictFromSupply(a.months_of_supply);
+    const sig = buySignal(a, DATA.rates);
+    return `<tr>
+      <td><b>${a.label}</b></td>
+      <td><span class="pill" style="background:var(--${v.color})">${v.text.replace(" MARKET","")}</span></td>
+      <td>${fmt$(a.median_sale_price)}</td>
+      <td>${fmtPct(a.price_yoy)}</td>
+      <td>${a.months_of_supply}</td>
+      <td>${a.days_on_market}</td>
+      <td>${a.price_drops_pct}%</td>
+      <td>${a.sale_to_list}%</td>
+      <td><b>${leverageScore(a)}</b></td>
+      <td><b>${sig.total}</b></td>
+    </tr>`;
+  }).join("");
+  document.getElementById("compareTable").innerHTML =
+    `<thead><tr>
+       <th>Area</th><th>Verdict</th><th>Median</th><th>YoY</th><th>Mo. supply</th>
+       <th>DOM</th><th>Cuts</th><th>Sale/list</th><th>Leverage</th><th>Buy signal</th>
+     </tr></thead><tbody>${rows}</tbody>`;
+
+  // Months-of-supply comparison bar (colored by verdict).
+  const el = document.getElementById("compareSupplyChart");
+  if (el && window.Chart){
+    destroyChart("compareSupplyChart");
+    charts.compareSupplyChart = new Chart(el, {
+      type:"bar",
+      data:{ labels:AREA_KEYS.map(k=>DATA.areas[k].label),
+        datasets:[{ label:"Months of supply",
+          data:AREA_KEYS.map(k=>DATA.areas[k].months_of_supply),
+          backgroundColor:AREA_KEYS.map(k=>{
+            const c=verdictFromSupply(DATA.areas[k].months_of_supply).color;
+            return getComputedStyle(document.documentElement).getPropertyValue('--'+c);
+          }) }]},
+      options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}},
+        scales:{ y:{ title:{display:true,text:"months (4=seller | 6=buyer thresholds)"} } } }
+    });
+  }
+}
+
+/* ====================================================================== */
+/* RENDER: BUY SIGNAL                                                      */
+/* ====================================================================== */
+function renderBuySignal(a){
+  const {total, subs} = buySignal(a, DATA.rates);
+  document.getElementById("buySignalScore").textContent = total + " / 100";
+  const band = signalBand(total);
+  const bandEl = document.getElementById("buySignalBand");
+  bandEl.className = "badge " + band.cls;
+  bandEl.textContent = band.text;
+  document.getElementById("subScores").innerHTML = subs.map(s=>`
+    <div class="subscore">
+      <span>${s.label} <span style="color:var(--muted)">(${s.detail})</span></span>
+      <span class="bar"><span style="width:${Math.round(s.score)}%"></span></span>
+      <span style="text-align:right"><b>${Math.round(s.score)}</b></span>
+    </div>`).join("");
+}
+
+/* ====================================================================== */
+/* DECISION TOOL 1: WAIT vs BUY NOW                                        */
+/* ====================================================================== */
+function runCalc(){
+  const price   = +document.getElementById("c_price").value;
+  const rate    = +document.getElementById("c_rate").value;
+  const months  = +document.getElementById("c_months").value;
+  const rateChg = +document.getElementById("c_ratechg").value;
+  const priceChg= +document.getElementById("c_pricechg").value;
+  const downPct = (+document.getElementById("c_down").value)/100;
+
+  // BUY NOW
+  const loanNow = price*(1-downPct);
+  const payNow  = monthlyPayment(loanNow, rate);
+  const totalNow= payNow*360; // total P&I over the life of the loan
+
+  // WAIT: price and rate move by your assumptions.
+  const priceLater = price*(1+priceChg/100);
+  const rateLater  = rate + rateChg;
+  const loanLater  = priceLater*(1-downPct);
+  const payLater   = monthlyPayment(loanLater, rateLater);
+  const totalLater = payLater*360;
+
+  // Round-trip transaction cost reference (~9% of price).
+  const roundTrip = price*0.09;
+
+  const dPay   = payLater - payNow;      // negative = waiting is cheaper monthly
+  const dTotal = totalLater - totalNow;  // negative = waiting is cheaper overall
+  const winner = dTotal < 0 ? "Waiting looks cheaper" : dTotal > 0 ? "Buying now looks cheaper" : "It's a wash";
+
+  document.getElementById("calcOut").innerHTML = `
+    <div class="winner">${winner}</div>
+    <table style="width:100%;margin-top:8px;border-collapse:collapse;font-size:14px">
+      <tr><th style="text-align:left"></th><th style="text-align:right">Buy now</th><th style="text-align:right">Wait ${months} mo</th></tr>
+      <tr><td>Price</td><td style="text-align:right">${fmt$(price)}</td><td style="text-align:right">${fmt$(priceLater)}</td></tr>
+      <tr><td>Rate</td><td style="text-align:right">${rate.toFixed(2)}%</td><td style="text-align:right">${rateLater.toFixed(2)}%</td></tr>
+      <tr><td>Monthly P&amp;I</td><td style="text-align:right">${fmt$(payNow)}</td><td style="text-align:right">${fmt$(payLater)}</td></tr>
+      <tr><td>Total P&amp;I over 30 yrs</td><td style="text-align:right">${fmt$(totalNow)}</td><td style="text-align:right">${fmt$(totalLater)}</td></tr>
+    </table>
+    <p style="margin:10px 0 0">Waiting changes your monthly payment by <b>${dPay>=0?"+":""}${fmt$(dPay)}</b>
+       and lifetime P&amp;I by <b>${dTotal>=0?"+":""}${fmt$(dTotal)}</b>.</p>
+    <p style="margin:6px 0 0;color:var(--muted)">
+      ⚠️ Reality check: round-trip transaction costs are roughly <b>${fmt$(roundTrip)}</b> (~9% of price:
+      commissions, closing, moving, plus seller-side costs when you eventually sell). That usually dwarfs
+      small rate wiggles — and you can refinance a rate later, but you can't un-pay the price.</p>`;
+}
+
+/* ====================================================================== */
+/* MAIN RENDER + WIRING                                                    */
+/* ====================================================================== */
+function render(){
+  const single = document.getElementById("singleView");
+  const compare = document.getElementById("compareView");
+
+  if (currentArea === "__all__"){
+    single.classList.add("hidden");
+    compare.classList.remove("hidden");
+    // Verdict banner in compare mode: summarize with the strongest-buyer area.
+    let best = AREA_KEYS[0];
+    AREA_KEYS.forEach(k=>{ if (leverageScore(DATA.areas[k]) > leverageScore(DATA.areas[best])) best=k; });
+    renderVerdict(DATA.areas[best]);
+    document.getElementById("verdictSummary").textContent =
+      `Comparing all three areas — ${DATA.areas[best].label} currently offers the most buyer leverage.`;
+    renderCompare();
+    renderBuySignal(DATA.areas[best]);
+    return;
+  }
+
+  single.classList.remove("hidden");
+  compare.classList.add("hidden");
+  const a = DATA.areas[currentArea];
+  renderVerdict(a);
+  renderMetrics(a);
+  renderCharts(a);
+  renderBuySignal(a);
+}
+
+function wire(){
+  document.getElementById("area").addEventListener("change", e=>{
+    currentArea = e.target.value; render();
+  });
+  ["c_price","c_rate","c_months","c_ratechg","c_pricechg","c_down"].forEach(id=>
+    document.getElementById(id).addEventListener("input", runCalc));
+  // Mobile: tap the "i" badge to toggle its tooltip.
+  document.addEventListener("click", e=>{
+    const badge = e.target.closest(".info");
+    document.querySelectorAll(".info.open").forEach(el=>{ if (el!==badge) el.classList.remove("open"); });
+    if (badge) badge.classList.toggle("open");
+  });
+  document.getElementById("asof").textContent =
+    `Data as of: Redfin ${DATA.data_sources?.redfin_period||"?"} · rates ${DATA.data_sources?.fred_asof||"?"}`;
+}
+
+/* Try to load live data; fall back to SEED on any failure. */
+async function boot(){
+  try {
+    const res = await fetch("data/market.json", {cache:"no-store"});
+    if (res.ok){
+      const json = await res.json();
+      if (json && json.areas && json.rates) DATA = json;
+    }
+  } catch(_){ /* file:// or missing file → keep SEED. Dashboard still renders. */ }
+  wire();
+  render();
+  runCalc();
+}
+boot();
+</script>
+</body>
+</html>
