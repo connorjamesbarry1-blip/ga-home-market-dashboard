@@ -21,7 +21,8 @@ It answers three questions at a glance:
 |------|---------|
 | `dashboard.html` | The dashboard. **Double-click to open** — no server, no build step. |
 | `fetch_data.py` | Deterministic ETL: pulls FRED rates + Redfin county data → writes `data/market.json`. |
-| `data/market.json` | The slim data file the dashboard reads (committed; refreshed weekly). |
+| `data/market.json` | The slim data file (committed; refreshed weekly). Handy for other tooling. |
+| `data/market.js` | Same payload as `window.MARKET_DATA` — lets the dashboard show **live** data on double-click (see note below). |
 | `.github/workflows/refresh-market-data.yml` | Weekly GitHub Action that re-runs the fetch and commits the data. |
 | `requirements.txt` | Python deps (`requests`, `pandas`). |
 
@@ -30,9 +31,17 @@ It answers three questions at a glance:
 ## Quick start
 
 ### 1. Open the dashboard
-Just double-click **`dashboard.html`**. If `data/market.json` is missing or you're offline,
-it falls back to built-in seed values so it always renders. Charts need internet (Chart.js CDN);
-everything else works offline.
+Just double-click **`dashboard.html`**. It loads data in this priority order, so it always renders:
+
+1. **`data/market.js`** (a `<script>` tag) — works even via `file://` (double-click), so you get
+   **live** data with no server.
+2. **`data/market.json`** (via `fetch`) — used when the page is *served* over HTTP.
+3. Built-in **seed** constants — if neither data file is present yet.
+
+> Why two data files? Browsers block `fetch()` of local files under `file://` for security, so a
+> plain double-click can't read `market.json` directly. The `market.js` sidecar (same data, assigned
+> to `window.MARKET_DATA`) sidesteps that. `fetch_data.py` writes both. Charts need internet
+> (Chart.js CDN); everything else works offline.
 
 ### 2. Get live data locally (optional)
 ```bash

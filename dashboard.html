@@ -9,6 +9,12 @@
      else (verdict, gauge, numbers, tooltips, calculators) still works. -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
+<!-- Live data sidecar. This <script> works even when the page is opened by
+     double-click (file://), where fetch() of a local file is blocked. If the
+     file is missing it just fails silently and we fall back to fetch()/SEED.
+     onerror keeps the console clean when running before any data exists. -->
+<script src="data/market.js" onerror="window.__marketJsMissing=true"></script>
+
 <style>
   /* ------------------------------------------------------------------ */
   /* Design tokens                                                       */
@@ -873,15 +879,24 @@ function wire(){
     `Data as of: Redfin ${DATA.data_sources?.redfin_period||"?"} · rates ${DATA.data_sources?.fred_asof||"?"}`;
 }
 
-/* Try to load live data; fall back to SEED on any failure. */
+/* Load live data with graceful fallbacks, in priority order:
+   1. window.MARKET_DATA — set by data/market.js via <script> (works on file://).
+   2. fetch('data/market.json') — works when served over HTTP (local server / Pages).
+   3. SEED — built-in constants, so the dashboard always renders.               */
 async function boot(){
-  try {
-    const res = await fetch("data/market.json", {cache:"no-store"});
-    if (res.ok){
-      const json = await res.json();
-      if (json && json.areas && json.rates) DATA = json;
-    }
-  } catch(_){ /* file:// or missing file → keep SEED. Dashboard still renders. */ }
+  // 1. Sidecar JS global (best for double-click / file://).
+  if (window.MARKET_DATA && window.MARKET_DATA.areas && window.MARKET_DATA.rates){
+    DATA = window.MARKET_DATA;
+  } else {
+    // 2. Fetch the JSON (works when served, e.g. `py -m http.server`).
+    try {
+      const res = await fetch("data/market.json", {cache:"no-store"});
+      if (res.ok){
+        const json = await res.json();
+        if (json && json.areas && json.rates) DATA = json;
+      }
+    } catch(_){ /* file:// blocks local fetch → fall through to SEED. */ }
+  }
   wire();
   render();
   runCalc();

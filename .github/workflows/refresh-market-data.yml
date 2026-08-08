@@ -53,11 +53,12 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if [ -n "$(git status --porcelain data/market.json)" ]; then
-            git add data/market.json
-            git commit -m "chore(data): weekly market.json refresh [skip ci]"
+          # fetch_data.py writes both the JSON and its JS sidecar (data/market.js).
+          if [ -n "$(git status --porcelain data/market.json data/market.js)" ]; then
+            git add data/market.json data/market.js
+            git commit -m "chore(data): weekly market data refresh [skip ci]"
             git push
             echo "Committed refreshed data."
           else
-            echo "No changes in data/market.json — nothing to commit."
+            echo "No changes in data/ — nothing to commit."
           fi
