@@ -74,49 +74,63 @@ REDFIN_PROPERTY_TYPE = "All Residential"
 # How many trailing periods (months) to keep for the housing trend charts.
 HOUSING_HISTORY_MONTHS = 12
 
-# Map each dashboard "area" -> the Redfin county `region` string (state-suffixed).
-# `region` in the county file looks like "Cherokee County, GA".
+# Map each dashboard "area" -> the Redfin county it comes from.
+# In the county file, REGION looks like "Cherokee County, GA" and there is a
+# separate STATE_CODE column ("GA"). We match on the county-name PREFIX + state
+# code rather than the full "..., GA" string, so we don't depend on Redfin's
+# exact suffix formatting, AND so we never accidentally pull same-named counties
+# in other states (there is a Cherokee County in AL/NC/OK and a Forsyth in NC).
 TARGET_COUNTIES = {
     "canton_cherokee": {
         "label": "Canton / Cherokee",
-        "county": "Cherokee County, GA",
-        "median_household_income": 95000,   # ~ Census ACS; used by affordability index
+        "county": "Cherokee County, GA",     # display only
+        "county_prefix": "Cherokee County",  # matched via REGION.startswith(...)
+        "state_code": "GA",
+        "median_household_income": 95000,    # ~ Census ACS; used by affordability index
     },
     "kennesaw_cobb": {
         "label": "Kennesaw / Cobb",
         "county": "Cobb County, GA",
+        "county_prefix": "Cobb County",
+        "state_code": "GA",
         "median_household_income": 88000,
     },
     "cumming_forsyth": {
         "label": "Cumming / Forsyth",
         "county": "Forsyth County, GA",
+        "county_prefix": "Forsyth County",
+        "state_code": "GA",
         "median_household_income": 135000,
     },
 }
 
 # --- Redfin column -> dashboard metric mapping ----------------------------- #
-# The county TSV is tab-separated with one row per (period_begin, region,
-# property_type). These are the columns we consume; everything else is dropped.
-#   period_begin          -> history label (YYYY-MM)
-#   region                -> county name we filter on
-#   property_type         -> filtered to REDFIN_PROPERTY_TYPE
-#   median_sale_price     -> median_sale_price
-#   median_sale_price_yoy -> price_yoy (fraction, e.g. -0.034)
-#   median_sale_price_mom -> price_mom (fraction)
-#   median_ppsf           -> median_ppsf (price per square foot)
-#   months_of_supply      -> months_of_supply  (LEADING indicator; <4 seller, 4-6 balanced, >6 buyer)
-#   median_dom            -> days_on_market
-#   avg_sale_to_list      -> sale_to_list (fraction, e.g. 0.973)
-#   price_drops           -> price_drops_pct (fraction of active listings with a price cut)
-#   inventory             -> inventory (active listings)
-#   inventory_yoy         -> inventory_yoy (fraction)
-#   new_listings          -> new_listings
+# The county TSV is tab-separated with one row per (PERIOD_BEGIN, REGION,
+# PROPERTY_TYPE, PERIOD_DURATION). Column names in the file are UPPERCASE and
+# every field is double-quoted (pandas' default quoting strips the quotes).
+# These are the columns we consume; everything else is dropped.
+#   PERIOD_BEGIN          -> history label (YYYY-MM)
+#   PERIOD_DURATION       -> used only to dedupe to one cadence per period
+#   REGION                -> county we filter on (prefix match)
+#   STATE_CODE            -> filtered to "GA" (disambiguates same-named counties)
+#   PROPERTY_TYPE         -> filtered to REDFIN_PROPERTY_TYPE
+#   MEDIAN_SALE_PRICE     -> median_sale_price
+#   MEDIAN_SALE_PRICE_YOY -> price_yoy   (fraction, e.g. -0.034 -> -3.4%)
+#   MEDIAN_SALE_PRICE_MOM -> price_mom   (fraction)
+#   MEDIAN_PPSF           -> median_ppsf (price per square foot, $)
+#   MONTHS_OF_SUPPLY      -> months_of_supply  (LEADING; <4 seller, 4-6 balanced, >6 buyer)
+#   MEDIAN_DOM            -> days_on_market
+#   AVG_SALE_TO_LIST      -> sale_to_list     (fraction, e.g. 0.973 -> 97.3%)
+#   PRICE_DROPS           -> price_drops_pct  (fraction of active listings with a cut)
+#   INVENTORY             -> inventory (active listings)
+#   INVENTORY_YOY         -> inventory_yoy (fraction)
+#   NEW_LISTINGS          -> new_listings
 REDFIN_COLUMNS = [
-    "period_begin", "region", "property_type",
-    "median_sale_price", "median_sale_price_yoy", "median_sale_price_mom",
-    "median_ppsf",
-    "months_of_supply", "median_dom", "avg_sale_to_list", "price_drops",
-    "inventory", "inventory_yoy", "new_listings",
+    "PERIOD_BEGIN", "PERIOD_DURATION", "REGION", "STATE_CODE", "PROPERTY_TYPE",
+    "MEDIAN_SALE_PRICE", "MEDIAN_SALE_PRICE_YOY", "MEDIAN_SALE_PRICE_MOM",
+    "MEDIAN_PPSF",
+    "MONTHS_OF_SUPPLY", "MEDIAN_DOM", "AVG_SALE_TO_LIST", "PRICE_DROPS",
+    "INVENTORY", "INVENTORY_YOY", "NEW_LISTINGS",
 ]
 
 logging.basicConfig(
@@ -284,7 +298,9 @@ def fetch_redfin_counties(session: requests.Session, last_good: dict) -> dict:
     and discard everything outside our county set as we go — we never hold the
     whole thing in memory.
     """
-    wanted_regions = {cfg["county"] for cfg in TARGET_COUNTIES.values()}
+    # The counties we care about are all in GA; pre-compute the state set + prefixes.
+    wanted_states = {cfg["state_code"] for cfg in TARGET_COUNTIES.values()}
+    wanted_prefixes = tuple(cfg["county_prefix"] for cfg in TARGET_COUNTIES.values())
     try:
         log.info("Downloading Redfin county file (this is a published file, not scraping)...")
         resp = session.get(REDFIN_COUNTY_URL, timeout=HTTP_TIMEOUT, stream=True)
@@ -294,12 +310,13 @@ def fetch_redfin_counties(session: requests.Session, last_good: dict) -> dict:
         collected: list[pd.DataFrame] = []
         reader = pd.read_csv(
             raw, sep="\t", usecols=REDFIN_COLUMNS, chunksize=100_000,
-            dtype={"region": "string", "property_type": "string"},
+            dtype={"REGION": "string", "STATE_CODE": "string", "PROPERTY_TYPE": "string"},
         )
         for chunk in reader:
             mask = (
-                chunk["region"].isin(wanted_regions)
-                & (chunk["property_type"] == REDFIN_PROPERTY_TYPE)
+                chunk["STATE_CODE"].isin(wanted_states)
+                & (chunk["PROPERTY_TYPE"] == REDFIN_PROPERTY_TYPE)
+                & chunk["REGION"].str.startswith(wanted_prefixes, na=False)
             )
             hit = chunk.loc[mask]
             if not hit.empty:
@@ -312,11 +329,22 @@ def fetch_redfin_counties(session: requests.Session, last_good: dict) -> dict:
         log.warning("Redfin fetch/parse failed (%s) — keeping last-good housing values.", exc)
         return last_good.get("areas", {})
 
-    df["period_begin"] = pd.to_datetime(df["period_begin"])
+    df["PERIOD_BEGIN"] = pd.to_datetime(df["PERIOD_BEGIN"])
     areas: dict[str, Any] = {}
 
     for area_key, cfg in TARGET_COUNTIES.items():
-        county_df = df[df["region"] == cfg["county"]].sort_values("period_begin")
+        county_df = df[
+            (df["STATE_CODE"] == cfg["state_code"])
+            & df["REGION"].str.startswith(cfg["county_prefix"], na=False)
+        ]
+        # The file can carry more than one PERIOD_DURATION (e.g. 4-week vs 12-week
+        # rolling). Keep a single, consistent cadence: the most common duration
+        # for this county, then one row per period.
+        if not county_df.empty and county_df["PERIOD_DURATION"].notna().any():
+            dominant = county_df["PERIOD_DURATION"].mode().iloc[0]
+            county_df = county_df[county_df["PERIOD_DURATION"] == dominant]
+        county_df = county_df.sort_values("PERIOD_BEGIN").drop_duplicates("PERIOD_BEGIN", keep="last")
+
         if county_df.empty:
             log.warning("No Redfin rows for %s — keeping last-good.", cfg["county"])
             areas[area_key] = last_good.get("areas", {}).get(area_key, {})
@@ -330,26 +358,26 @@ def fetch_redfin_counties(session: requests.Session, last_good: dict) -> dict:
             "county": cfg["county"],
             "median_household_income": cfg["median_household_income"],
             # Fractions in the file are converted to human-friendly percentages here.
-            "median_sale_price": _round(latest["median_sale_price"], 0),
-            "median_ppsf": _round(latest["median_ppsf"], 0),
-            "price_yoy": _round(latest["median_sale_price_yoy"] * 100, 1),
-            "price_mom": _round(latest["median_sale_price_mom"] * 100, 1),
-            "months_of_supply": _round(latest["months_of_supply"], 1),
-            "days_on_market": _round(latest["median_dom"], 0),
-            "price_drops_pct": _round(latest["price_drops"] * 100, 0),
-            "sale_to_list": _round(latest["avg_sale_to_list"] * 100, 1),
-            "inventory": _round(latest["inventory"], 0),
-            "inventory_yoy": _round(latest["inventory_yoy"] * 100, 1),
-            "new_listings": _round(latest["new_listings"], 0),
+            "median_sale_price": _round(latest["MEDIAN_SALE_PRICE"], 0),
+            "median_ppsf": _round(latest["MEDIAN_PPSF"], 0),
+            "price_yoy": _round(latest["MEDIAN_SALE_PRICE_YOY"] * 100, 1),
+            "price_mom": _round(latest["MEDIAN_SALE_PRICE_MOM"] * 100, 1),
+            "months_of_supply": _round(latest["MONTHS_OF_SUPPLY"], 1),
+            "days_on_market": _round(latest["MEDIAN_DOM"], 0),
+            "price_drops_pct": _round(latest["PRICE_DROPS"] * 100, 0),
+            "sale_to_list": _round(latest["AVG_SALE_TO_LIST"] * 100, 1),
+            "inventory": _round(latest["INVENTORY"], 0),
+            "inventory_yoy": _round(latest["INVENTORY_YOY"] * 100, 1),
+            "new_listings": _round(latest["NEW_LISTINGS"], 0),
             "history": {
-                "labels": [d.strftime("%Y-%m") for d in window["period_begin"]],
-                "median_sale_price": [_round(v, 0) for v in window["median_sale_price"]],
-                "months_of_supply": [_round(v, 1) for v in window["months_of_supply"]],
-                "days_on_market": [_round(v, 0) for v in window["median_dom"]],
-                "price_drops_pct": [_round(v * 100, 0) for v in window["price_drops"]],
+                "labels": [d.strftime("%Y-%m") for d in window["PERIOD_BEGIN"]],
+                "median_sale_price": [_round(v, 0) for v in window["MEDIAN_SALE_PRICE"]],
+                "months_of_supply": [_round(v, 1) for v in window["MONTHS_OF_SUPPLY"]],
+                "days_on_market": [_round(v, 0) for v in window["MEDIAN_DOM"]],
+                "price_drops_pct": [_round(v * 100, 0) for v in window["PRICE_DROPS"]],
             },
         }
-        log.info("Redfin %s: latest period %s.", cfg["county"], latest["period_begin"].strftime("%Y-%m"))
+        log.info("Redfin %s: latest period %s.", cfg["county"], latest["PERIOD_BEGIN"].strftime("%Y-%m"))
 
     return areas
 
