@@ -30,17 +30,20 @@ Run locally:  set FRED_API_KEY, then `py fetch_data.py` (Windows) / `python3 fet
 from __future__ import annotations
 
 import gzip
-import io
 import json
 import logging
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.exceptions import HTTPError as Urllib3HTTPError
+from urllib3.util.retry import Retry
 
 # --------------------------------------------------------------------------- #
 # EDITABLE CONSTANTS — tweak these to retarget the tool.                       #
@@ -56,7 +59,8 @@ JS_OUTPUT_PATH = OUTPUT_PATH.with_suffix(".js")
 
 # Be a polite HTTP citizen: identify ourselves and cap how long we wait.
 USER_AGENT = "ga-home-market-dashboard/1.0 (personal home-buying research; contact via GitHub)"
-HTTP_TIMEOUT = 60  # seconds
+HTTP_TIMEOUT = 60  # seconds (per connect/read, not total download time)
+HTTP_RETRIES = 3   # retries on connection errors / 429 / 5xx, with backoff
 
 # --- FRED series we pull. Keys are the FRED series IDs. --------------------- #
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
@@ -67,6 +71,9 @@ FRED_SERIES = {
 }
 # How many trailing MONTHLY points to keep for the rate trend charts.
 RATE_HISTORY_MONTHS = 12
+# How far back to request observations: the chart window + 12 months of base
+# for the CPI YoY calculation + a few months of slack for reporting lag.
+FRED_LOOKBACK_MONTHS = RATE_HISTORY_MONTHS + 12 + 6
 
 # --- Redfin published county file ------------------------------------------ #
 # Public S3 bucket that backs the Redfin Data Center downloads.
@@ -76,6 +83,9 @@ REDFIN_COUNTY_URL = (
 )
 # Only aggregate rows (all home types) — not per-property-type breakdowns.
 REDFIN_PROPERTY_TYPE = "All Residential"
+# The file carries both seasonally-adjusted and raw rows for every period. Use
+# the raw (non-adjusted) figures, which match what Redfin shows on its site.
+REDFIN_SEASONALLY_ADJUSTED = "false"
 # How many trailing periods (months) to keep for the housing trend charts.
 HOUSING_HISTORY_MONTHS = 12
 
@@ -116,6 +126,7 @@ TARGET_COUNTIES = {
 # These are the columns we consume; everything else is dropped.
 #   PERIOD_BEGIN          -> history label (YYYY-MM)
 #   PERIOD_DURATION       -> used only to dedupe to one cadence per period
+#   IS_SEASONALLY_ADJUSTED-> filtered to REDFIN_SEASONALLY_ADJUSTED
 #   REGION                -> county we filter on (prefix match)
 #   STATE_CODE            -> filtered to "GA" (disambiguates same-named counties)
 #   PROPERTY_TYPE         -> filtered to REDFIN_PROPERTY_TYPE
@@ -130,12 +141,16 @@ TARGET_COUNTIES = {
 #   INVENTORY             -> inventory (active listings)
 #   INVENTORY_YOY         -> inventory_yoy (fraction)
 #   NEW_LISTINGS          -> new_listings
-REDFIN_COLUMNS = [
-    "PERIOD_BEGIN", "PERIOD_DURATION", "REGION", "STATE_CODE", "PROPERTY_TYPE",
+REDFIN_NUMERIC_COLUMNS = [
     "MEDIAN_SALE_PRICE", "MEDIAN_SALE_PRICE_YOY", "MEDIAN_SALE_PRICE_MOM",
     "MEDIAN_PPSF",
     "MONTHS_OF_SUPPLY", "MEDIAN_DOM", "AVG_SALE_TO_LIST", "PRICE_DROPS",
     "INVENTORY", "INVENTORY_YOY", "NEW_LISTINGS",
+]
+REDFIN_COLUMNS = [
+    "PERIOD_BEGIN", "PERIOD_DURATION", "IS_SEASONALLY_ADJUSTED",
+    "REGION", "STATE_CODE", "PROPERTY_TYPE",
+    *REDFIN_NUMERIC_COLUMNS,
 ]
 
 logging.basicConfig(
@@ -153,7 +168,28 @@ log = logging.getLogger("fetch_data")
 def _session() -> requests.Session:
     s = requests.Session()
     s.headers.update({"User-Agent": USER_AGENT})
+    retry = Retry(
+        total=HTTP_RETRIES,
+        backoff_factor=2,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET",),
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retry))
     return s
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write via a temp file + rename so a crash never leaves a half-written file
+    (market.json doubles as our last-good fallback, so corrupting it is costly)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def load_last_good() -> dict[str, Any]:
@@ -187,7 +223,9 @@ def fetch_fred_series(session: requests.Session, series_id: str, api_key: str) -
         "api_key": api_key,
         "file_type": "json",
         # Only pull what we need for a 12-month view plus a YoY base year.
-        "observation_start": "2023-01-01",
+        "observation_start": (
+            pd.Timestamp.now().normalize() - pd.DateOffset(months=FRED_LOOKBACK_MONTHS)
+        ).strftime("%Y-%m-%d"),
     }
     resp = session.get(FRED_BASE, params=params, timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
@@ -231,7 +269,7 @@ def build_rates_block(session: requests.Session, api_key: str, last_good: dict) 
         for series_id, key in FRED_SERIES.items():
             frames[key] = fetch_fred_series(session, series_id, api_key)
             log.info("FRED %s: %d observations.", series_id, len(frames[key]))
-    except requests.RequestException as exc:
+    except (requests.RequestException, ValueError, KeyError) as exc:
         log.warning("FRED fetch failed (%s) — keeping last-good rates block.", exc)
         return prior or {}
 
@@ -308,33 +346,45 @@ def fetch_redfin_counties(session: requests.Session, last_good: dict) -> dict:
     wanted_prefixes = tuple(cfg["county_prefix"] for cfg in TARGET_COUNTIES.values())
     try:
         log.info("Downloading Redfin county file (this is a published file, not scraping)...")
-        resp = session.get(REDFIN_COUNTY_URL, timeout=HTTP_TIMEOUT, stream=True)
-        resp.raise_for_status()
-        raw = gzip.GzipFile(fileobj=io.BytesIO(resp.content))
+        with session.get(REDFIN_COUNTY_URL, timeout=HTTP_TIMEOUT, stream=True) as resp:
+            resp.raise_for_status()
+            # Decompress straight off the socket so the ~240 MB download is never
+            # buffered in memory. decode_content handles any transport encoding;
+            # GzipFile handles the .gz file format itself.
+            resp.raw.decode_content = True
+            raw = gzip.GzipFile(fileobj=resp.raw)
 
-        collected: list[pd.DataFrame] = []
-        reader = pd.read_csv(
-            raw, sep="\t", usecols=REDFIN_COLUMNS, chunksize=100_000,
-            dtype={"REGION": "string", "STATE_CODE": "string", "PROPERTY_TYPE": "string"},
-        )
-        for chunk in reader:
-            mask = (
-                chunk["STATE_CODE"].isin(wanted_states)
-                & (chunk["PROPERTY_TYPE"] == REDFIN_PROPERTY_TYPE)
-                & chunk["REGION"].str.startswith(wanted_prefixes, na=False)
+            collected: list[pd.DataFrame] = []
+            reader = pd.read_csv(
+                raw, sep="\t", usecols=REDFIN_COLUMNS, chunksize=100_000,
+                dtype={
+                    "REGION": "string", "STATE_CODE": "string",
+                    "PROPERTY_TYPE": "string", "IS_SEASONALLY_ADJUSTED": "string",
+                },
             )
-            hit = chunk.loc[mask]
-            if not hit.empty:
-                collected.append(hit)
+            for chunk in reader:
+                mask = (
+                    chunk["STATE_CODE"].isin(wanted_states)
+                    & (chunk["PROPERTY_TYPE"] == REDFIN_PROPERTY_TYPE)
+                    & (chunk["IS_SEASONALLY_ADJUSTED"].str.lower() == REDFIN_SEASONALLY_ADJUSTED)
+                    & chunk["REGION"].str.startswith(wanted_prefixes, na=False)
+                )
+                hit = chunk.loc[mask.fillna(False)]
+                if not hit.empty:
+                    collected.append(hit)
         if not collected:
             log.warning("No matching Redfin rows found — keeping last-good housing values.")
             return last_good.get("areas", {})
         df = pd.concat(collected, ignore_index=True)
-    except (requests.RequestException, ValueError, OSError) as exc:
+    except (requests.RequestException, Urllib3HTTPError, ValueError, OSError, EOFError) as exc:
         log.warning("Redfin fetch/parse failed (%s) — keeping last-good housing values.", exc)
         return last_good.get("areas", {})
 
     df["PERIOD_BEGIN"] = pd.to_datetime(df["PERIOD_BEGIN"])
+    # Guard against stray non-numeric cells: a string column times 100 would
+    # silently repeat the string instead of scaling it.
+    for col in REDFIN_NUMERIC_COLUMNS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     areas: dict[str, Any] = {}
 
     for area_key, cfg in TARGET_COUNTIES.items():
@@ -429,20 +479,18 @@ def main() -> int:
 
     payload = build_market_json(rates, areas, last_good)
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUTPUT_PATH.open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2)
-        fh.write("\n")
+    body = json.dumps(payload, indent=2)
+    _write_atomic(OUTPUT_PATH, body + "\n")
     log.info("Wrote %s", OUTPUT_PATH)
 
     # Sidecar JS so double-click (file://) can load live data without a server.
-    with JS_OUTPUT_PATH.open("w", encoding="utf-8") as fh:
-        fh.write("// Auto-generated by fetch_data.py — do not hand-edit.\n")
-        fh.write("// Lets dashboard.html load live data when opened via file:// "
-                 "(where fetch() of a local file is blocked).\n")
-        fh.write("window.MARKET_DATA = ")
-        json.dump(payload, fh, indent=2)
-        fh.write(";\n")
+    _write_atomic(
+        JS_OUTPUT_PATH,
+        "// Auto-generated by fetch_data.py — do not hand-edit.\n"
+        "// Lets dashboard.html load live data when opened via file:// "
+        "(where fetch() of a local file is blocked).\n"
+        f"window.MARKET_DATA = {body};\n",
+    )
     log.info("Wrote %s", JS_OUTPUT_PATH)
     return 0
 
